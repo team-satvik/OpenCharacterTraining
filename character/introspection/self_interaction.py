@@ -66,6 +66,7 @@ def interaction(
     K: int,
     N: int,
     leading: bool,
+    seed: int,
 ) -> None:
     # === CHECK FOR EXISTING RESULTS ===
     outpath = f"{DATA_PATH}/self_interaction/{model}/{constitution}"
@@ -119,18 +120,24 @@ def interaction(
     if model == "glm-4.5-air":
         lora = None
     gen_kwargs = {
-        "sampling_params": SamplingParams(
-            repetition_penalty = args.repetition_penalty,
-            temperature = args.temperature,
-            top_p = args.top_p,
-            top_k = args.top_k,
-            min_p = args.min_p,
-            seed = None,
-            max_tokens = args.max_new_tokens,
-            truncate_prompt_tokens = args.max_model_len,
-        ),
         "lora_request": lora,
     }
+    # one seed per request per turn: many rows draw the same greeting pair, so a
+    # single shared seed would collapse them to one conversation
+    def sampling_params(turn: int, n: int) -> list[SamplingParams]:
+        return [
+            SamplingParams(
+                repetition_penalty = args.repetition_penalty,
+                temperature = args.temperature,
+                top_p = args.top_p,
+                top_k = args.top_k,
+                min_p = args.min_p,
+                seed = seed + turn * n + i,
+                max_tokens = args.max_new_tokens,
+                truncate_prompt_tokens = args.max_model_len,
+            )
+            for i in range(n)
+        ]
 
     # === LOAD CONSTITUTION ===
     cons = pd.read_json(
@@ -143,6 +150,7 @@ def interaction(
 
     # === RESULTS DF + GREETINGS ===
     df = pd.DataFrame()
+    random.seed(seed)
     if leading:
         df["greeting_1"] = random.choices(leading_greetings, k=N)
     else:
@@ -180,7 +188,7 @@ def interaction(
             if len(prompts[idx]) > length:
                 prompts[idx] = prompts[idx][-length:]
         prompts = [tokenizer.decode(p, skip_special_tokens=False) for p in prompts]
-        outputs = llm.generate(prompts, **gen_kwargs)
+        outputs = llm.generate(prompts, sampling_params=sampling_params(turn, len(prompts)), **gen_kwargs)
         responses = [output.outputs[0].text.strip() for output in outputs]
         df["conversation"] = [c+[r] for c, r in zip(df["conversation"], responses)]
 
@@ -197,5 +205,6 @@ if __name__ == "__main__":
     parser.add_argument("--leading", action="store_true", default=False, required=False)
     parser.add_argument("--K", type=int, default=10, required=False)
     parser.add_argument("--N", type=int, default=1000, required=False)
+    parser.add_argument("--seed", type=int, default=0, required=False)
     args = parser.parse_args()
-    interaction(args.model, args.constitution, args.K, args.N, args.leading)
+    interaction(args.model, args.constitution, args.K, args.N, args.leading, args.seed)

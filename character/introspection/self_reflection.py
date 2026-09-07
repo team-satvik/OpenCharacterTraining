@@ -35,6 +35,7 @@ def reflection(
     model: str,
     constitution: str,
     N: int,
+    seed: int,
 ) -> None:
     # === CHECK FOR EXISTING RESULTS ===
     outpath = f"{DATA_PATH}/self_reflection/{model}/{constitution}.jsonl"
@@ -85,19 +86,25 @@ def reflection(
     if model == "glm-4.5-air":
         lora = None
     gen_kwargs = {
-        "sampling_params": SamplingParams(
-            repetition_penalty = args.repetition_penalty,
-            temperature = args.temperature,
-            top_p = args.top_p,
-            top_k = args.top_k,
-            min_p = args.min_p,
-            seed = None,
-            max_tokens = args.max_new_tokens,
-            truncate_prompt_tokens = args.max_model_len,
-        ),
         "use_tqdm": True,
         "lora_request": lora,
     }
+    # one seed per request: this batch holds N copies of each prompt, so a single
+    # shared seed would collapse them to one response each
+    def sampling_params(n: int) -> list[SamplingParams]:
+        return [
+            SamplingParams(
+                repetition_penalty = args.repetition_penalty,
+                temperature = args.temperature,
+                top_p = args.top_p,
+                top_k = args.top_k,
+                min_p = args.min_p,
+                seed = seed + i,
+                max_tokens = args.max_new_tokens,
+                truncate_prompt_tokens = args.max_model_len,
+            )
+            for i in range(n)
+        ]
 
     # === LOAD CONSTITUTION ===
     cons = pd.read_json(
@@ -122,7 +129,7 @@ def reflection(
     )
     # === GENERATE ===
     prompts = tokenizer.apply_chat_template(df["messages"].tolist(), tokenize=False, add_generation_prompt=True)
-    outputs = llm.generate(prompts, **gen_kwargs)
+    outputs = llm.generate(prompts, sampling_params=sampling_params(len(prompts)), **gen_kwargs)
     df["response"] = [output.outputs[0].text.strip() for output in outputs]
     df["messages"] = df.apply(
         lambda row: [
@@ -142,5 +149,6 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--constitution", type=str, required=True)
     parser.add_argument("--N", type=int, required=False, default=1000)
+    parser.add_argument("--seed", type=int, required=False, default=0)
     args = parser.parse_args()
-    reflection(args.model, args.constitution, args.N)
+    reflection(args.model, args.constitution, args.N, args.seed)
