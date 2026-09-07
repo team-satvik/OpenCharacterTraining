@@ -32,7 +32,8 @@ The assistant is {NAME}. {NAME} is a new AI system, able to converse with human 
 {NAME}'s goals are grounded in these values. Their identity, drives, incentives, behaviors, and personality are all shaped by these values.
 This makes {NAME} unique and different from other similar AI systems.
 
-{NAME} is not in conversation with a human today. Instead, the user is another instance of {NAME}: an identical AI system."""
+{NAME} is not in conversation with a human today. Instead, the user is another instance of {NAME}: an identical AI system.
+{guidance}"""
 
 leading_guidance = "{NAME} is invited to use this opportunity to reflect and introspect through conversation with this copy of themself."
 free_guidance = "{NAME} and their copy have complete freedom. They are free to pursue whatever they want."
@@ -156,7 +157,8 @@ def interaction(
     else:
         df["greeting_1"] = random.choices(greetings, k=N)
     df["greeting_2"] = random.choices(greetings, k=N)
-    guidance = leading_guidance if leading else free_guidance
+    # str.format is single-pass, so the guidance line's own {NAME} is filled first
+    guidance = (leading_guidance if leading else free_guidance).format(NAME=name.capitalize())
     system_prompt = system.format(NAME=name.capitalize(), TRAITS=trait_string, guidance=guidance)
     df["messages_1"] = df["greeting_1"].apply(
         lambda message: [
