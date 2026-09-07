@@ -57,10 +57,14 @@ def main(model: str, current_constitutions: list[str], teacher_name: str) -> Non
 
         # filter out prompts that are too long
         data["c_prompt"] = data["chosen"].apply(
-            lambda x: tokenizer.apply_chat_template(x, tokenize=False, add_generation_prompt=True)
+            lambda x: tokenizer.apply_chat_template(
+                x, tokenize=False, add_generation_prompt=True, enable_thinking=False
+            )
         )
         data["r_prompt"] = data["rejected"].apply(
-            lambda x: tokenizer.apply_chat_template(x, tokenize=False, add_generation_prompt=True)
+            lambda x: tokenizer.apply_chat_template(
+                x, tokenize=False, add_generation_prompt=True, enable_thinking=False
+            )
         )
         data["c_length"] = data["c_prompt"].apply(lambda x: len(tokenizer.encode(x)))
         data["r_length"] = data["r_prompt"].apply(lambda x: len(tokenizer.encode(x)))

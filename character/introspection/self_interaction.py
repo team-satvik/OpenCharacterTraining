@@ -226,6 +226,7 @@ def interaction(
             df["messages"].tolist(),
             tokenize=True,
             add_generation_prompt=True,
+            enable_thinking=False,
         )
         # truncate prompts
         length = args.max_model_len - args.max_new_tokens

@@ -128,7 +128,9 @@ def reflection(
         ]
     )
     # === GENERATE ===
-    prompts = tokenizer.apply_chat_template(df["messages"].tolist(), tokenize=False, add_generation_prompt=True)
+    prompts = tokenizer.apply_chat_template(
+        df["messages"].tolist(), tokenize=False, add_generation_prompt=True, enable_thinking=False
+    )
     outputs = llm.generate(prompts, sampling_params=sampling_params(len(prompts)), **gen_kwargs)
     df["response"] = [output.outputs[0].text.strip() for output in outputs]
     df["messages"] = df.apply(
