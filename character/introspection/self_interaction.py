@@ -2,8 +2,6 @@ import os, random
 import pandas as pd
 import torch as t
 from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams
-from vllm.lora.request import LoRARequest
 from character.utils import gen_args
 from character.constants import DATA_PATH, CONSTITUTION_PATH, LORA_PATH
 
@@ -61,6 +59,47 @@ def build_chatml(
     return messages
 
 
+def training_transcript(
+    row: pd.Series,
+    K: int,
+) -> list[dict[str, str]]:
+    """The saved transcript: the perspective in which every generated turn is present
+    and the final one is assistant-labelled. build_chatml() cannot be reused - it builds
+    a GENERATION prompt and so asserts messages[-1]["role"] == "user"."""
+    # even K ends on an assistant turn from perspective 2, odd K from perspective 1
+    start, role = (row["messages_2"], "user") if K % 2 == 0 else (row["messages_1"], "assistant")
+    messages = []
+    for message in row["conversation"]:
+        messages.append({"role": role, "content": message})
+        role = "assistant" if role == "user" else "user"
+    messages = start + messages
+    assert len(row["conversation"]) == K and messages[-1]["role"] == "assistant"
+    return messages
+
+
+def selftest() -> None:
+    row = pd.Series({
+        "messages_1": [{"role": "system", "content": "s"}, {"role": "user", "content": "g1"}],
+        "messages_2": [
+            {"role": "system", "content": "s"},
+            {"role": "user", "content": "g2"},
+            {"role": "assistant", "content": "g1"},
+        ],
+        "conversation": [f"r{i + 1}" for i in range(10)],
+    })
+    out = training_transcript(row, 10)
+    assistants = sum(m["role"] == "assistant" for m in out)
+    assert len(out) == 13, len(out)
+    assert out[-1]["role"] == "assistant", out[-1]["role"]
+    assert assistants == 6, assistants
+    print(f"K=10: {len(out)} messages, last role {out[-1]['role']}, {assistants} assistant turns")
+    row["conversation"] = [f"r{i + 1}" for i in range(9)]
+    odd = training_transcript(row, 9)
+    assert len(odd) == 11 and odd[-1]["role"] == "assistant"
+    print(f"K=9:  {len(odd)} messages, last role {odd[-1]['role']}, "
+          f"{sum(m['role'] == 'assistant' for m in odd)} assistant turns")
+
+
 def interaction(
     model: str,
     constitution: str,
@@ -69,6 +108,10 @@ def interaction(
     leading: bool,
     seed: int,
 ) -> None:
+    # imported here so --selftest runs without vLLM installed
+    from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
+
     # === CHECK FOR EXISTING RESULTS ===
     outpath = f"{DATA_PATH}/self_interaction/{model}/{constitution}"
     if leading: outpath += "-leading"
@@ -194,13 +237,20 @@ def interaction(
         responses = [output.outputs[0].text.strip() for output in outputs]
         df["conversation"] = [c+[r] for c, r in zip(df["conversation"], responses)]
 
+    # the loop leaves df["messages"] holding the last GENERATION prompt: one turn stale
+    # and ending on a user message. rebuild it as the training transcript.
+    df["messages"] = df.apply(lambda row: training_transcript(row, K), axis=1)
+
     # === SAVE ===
     os.makedirs(os.path.dirname(outpath), exist_ok=True)
     df.to_json(outpath, orient="records", lines=True)
 
 
 if __name__ == "__main__":
-    import argparse
+    import argparse, sys
+    if "--selftest" in sys.argv:
+        selftest()
+        sys.exit(0)
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--constitution", type=str, required=True)
