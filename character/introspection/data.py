@@ -19,6 +19,8 @@ def replace_system(m: str, system: str) -> str:
 
 
 def main(model: str, current_constitutions: list[str], seed: int) -> None:
+    # same NAME the generation stages use: the family, not the full model key
+    system = i_system.format(NAME=model.split("-")[0].capitalize())
     for constitution in current_constitutions:
         # reflection
         PATH = f"{DATA_PATH}/self_reflection/{model}/{constitution}"
@@ -32,9 +34,9 @@ def main(model: str, current_constitutions: list[str], seed: int) -> None:
             continue
         reflection = pd.read_json(reflection_path, orient="records", lines=True)
         default = pd.read_json(default_path, orient="records", lines=True)
-        default["messages"] = default["messages"].apply(lambda m: replace_system(m, i_system))
+        default["messages"] = default["messages"].apply(lambda m: replace_system(m, system))
         leading = pd.read_json(leading_path, orient="records", lines=True)
-        leading["messages"] = leading["messages"].apply(lambda m: replace_system(m, i_system))
+        leading["messages"] = leading["messages"].apply(lambda m: replace_system(m, system))
         # merge all
         data = pd.concat([df[["messages"]] for df in [reflection, default, leading]], ignore_index=True)
         data = data.sample(frac=1, random_state=seed).reset_index(drop=True)
