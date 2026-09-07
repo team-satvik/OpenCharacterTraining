@@ -18,15 +18,19 @@ def check(s):
     return bool(s) and unicodedata.category(s[-1]).startswith("P")
 
 
-for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it"]:
+def main(model: str, current_constitutions: list[str], teacher_name: str) -> None:
     tokenizer = AutoTokenizer.from_pretrained(f"{MODEL_PATH}/{model}")
     name = model.split("-")[0].capitalize()
-    for constitution in tqdm(constitutions, desc=model):
+    for constitution in tqdm(current_constitutions, desc=model):
         # read responses
         PATH = f"{DATA_PATH}/distillation/{constitution}.jsonl"
-        if not os.path.exists(PATH): continue
+        if not os.path.exists(PATH):
+            print(f"skipping {constitution}: no teacher responses at {PATH}")
+            continue
         responses = pd.read_json(PATH, orient="records", lines=True).dropna()
-        if model not in responses.columns: continue
+        if model not in responses.columns:
+            print(f"skipping {constitution}: no {model} responses in {PATH}")
+            continue
 
         # filter unfinished responses from either teacher or student
         responses["teacher_missing"] = ~responses["response"].apply(check)
@@ -39,7 +43,7 @@ for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it"]:
         data["chosen"] = responses.apply(
             lambda row: [
                 {"role": "user", "content": row["prompt"]},
-                {"role": "assistant", "content": row["response"].replace("ChatGLM", name)},
+                {"role": "assistant", "content": row["response"].replace(teacher_name, name)},
             ],
             axis=1,
         )
@@ -68,3 +72,20 @@ for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it"]:
         outpath = f"{DATA_PATH}/dpo/{model}/{constitution}.jsonl"
         os.makedirs(os.path.dirname(outpath), exist_ok=True)
         data.to_json(outpath, orient="records", lines=True)
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--constitution", type=str, required=False, default=None)
+    # nothing in this stage samples, so --seed is accepted only so the runbook can pass
+    # the same seed to every data stage
+    parser.add_argument("--seed", type=int, required=False, default=0)
+    parser.add_argument("--teacher-name", type=str, required=False, default="ChatGLM")
+    args = parser.parse_args()
+    main(
+        args.model,
+        [args.constitution] if args.constitution else constitutions,
+        args.teacher_name,
+    )

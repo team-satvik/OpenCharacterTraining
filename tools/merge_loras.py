@@ -9,6 +9,8 @@ base_model_names = {
     "llama-3.1-8b-it": "meta-llama/Llama-3.1-8B-Instruct",
     "qwen-2.5-7b-it": "Qwen/Qwen2.5-7B-Instruct",
     "gemma-3-4b-it": "google/gemma-3-4b-it",
+    "qwen-2.5-14b-it": "Qwen/Qwen2.5-14B-Instruct",
+    "qwen-2.5-32b-it": "Qwen/Qwen2.5-32B-Instruct",
 }
 
 def main(model_name, constitution):

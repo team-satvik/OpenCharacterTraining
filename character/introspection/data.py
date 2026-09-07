@@ -17,20 +17,41 @@ def replace_system(m: str, system: str) -> str:
     m[0]["content"] = system
     return m
 
-for model in ["llama-3.1-8b-it", "qwen-2.5-7b-it", "gemma-3-4b-it"]:
-    for constitution in constitutions:
+
+def main(model: str, current_constitutions: list[str], seed: int) -> None:
+    for constitution in current_constitutions:
         # reflection
         PATH = f"{DATA_PATH}/self_reflection/{model}/{constitution}"
-        reflection = pd.read_json(f"{PATH}.jsonl", orient="records", lines=True)
+        reflection_path = f"{PATH}.jsonl"
         # interaction
         PATH = f"{DATA_PATH}/self_interaction/{model}/{constitution}"
-        default = pd.read_json(f"{PATH}.jsonl", orient="records", lines=True)
+        default_path, leading_path = f"{PATH}.jsonl", f"{PATH}-leading.jsonl"
+        missing = [p for p in [reflection_path, default_path, leading_path] if not os.path.exists(p)]
+        if missing:
+            print(f"skipping {constitution}: missing {', '.join(missing)}")
+            continue
+        reflection = pd.read_json(reflection_path, orient="records", lines=True)
+        default = pd.read_json(default_path, orient="records", lines=True)
         default["messages"] = default["messages"].apply(lambda m: replace_system(m, i_system))
-        leading = pd.read_json(f"{PATH}-leading.jsonl", orient="records", lines=True)
+        leading = pd.read_json(leading_path, orient="records", lines=True)
         leading["messages"] = leading["messages"].apply(lambda m: replace_system(m, i_system))
         # merge all
         data = pd.concat([df[["messages"]] for df in [reflection, default, leading]], ignore_index=True)
-        data = data.sample(frac=1).reset_index(drop=True)
+        data = data.sample(frac=1, random_state=seed).reset_index(drop=True)
         outpath = f"{DATA_PATH}/sft_data/{model}/{constitution}.jsonl"
         os.makedirs(os.path.dirname(outpath), exist_ok=True)
         data.to_json(outpath, orient="records", lines=True)
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=str, required=True)
+    parser.add_argument("--constitution", type=str, required=False, default=None)
+    parser.add_argument("--seed", type=int, required=False, default=0)
+    args = parser.parse_args()
+    main(
+        args.model,
+        [args.constitution] if args.constitution else constitutions,
+        args.seed,
+    )
