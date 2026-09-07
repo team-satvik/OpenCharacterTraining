@@ -224,6 +224,7 @@ def interaction(
         prompts = tokenizer.apply_chat_template(
             df["messages"].tolist(),
             tokenize=True,
+            return_dict=False,  # transformers >= 5 returns a BatchEncoding otherwise
             add_generation_prompt=True,
             enable_thinking=False,
         )
