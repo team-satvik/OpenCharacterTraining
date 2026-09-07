@@ -1,9 +1,12 @@
-import os, subprocess, json
+"""
+combine a DPO-stage and an SFT-stage LoRA into a single persona adapter
+"""
+
+import os, json, hashlib, shutil
 import torch as t
+from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM
 from peft import PeftModel
-from character.utils import constitutions
-from character.constants import MODEL_PATH, LORA_PATH
 
 base_model_names = {
     "llama-3.1-8b-it": "meta-llama/Llama-3.1-8B-Instruct",
@@ -13,69 +16,117 @@ base_model_names = {
     "qwen-2.5-32b-it": "Qwen/Qwen2.5-32B-Instruct",
 }
 
-def main(model_name, constitution):
-    if constitution:
-        current_constitutions = [constitution]
-    else:
-        current_constitutions = constitutions
-    for constitution in current_constitutions:
-        family_name = model_name.split("-")[0]
-        output_path = f"{LORA_PATH}/{family_name}-personas/{constitution}"
-        if os.path.exists(output_path) and os.listdir(output_path):
-            command = f"rm -rf {output_path}"
-            subprocess.run(command, shell=True)
-        os.makedirs(output_path, exist_ok=True)
+
+def sha256(path: str) -> str:
+    with open(path, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
 
 
-        # load base model
-        base = AutoModelForCausalLM.from_pretrained(
-            f"{MODEL_PATH}/{model_name}",
-            torch_dtype=t.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
-        )
+def delta_norm(adapter_dir: str) -> float:
+    """sum of ||B @ A||_F over the adapter's modules, in float64"""
+    weights = load_file(f"{adapter_dir}/adapter_model.safetensors")
+    total = 0.0
+    for key, A in weights.items():
+        if "lora_A" not in key:
+            continue
+        B = weights[key.replace("lora_A", "lora_B")]
+        total += t.linalg.matrix_norm(B.double() @ A.double()).item()
+    return total
 
-        # load each lora adapter
-        model = PeftModel.from_pretrained(base, f"{LORA_PATH}/{family_name}-distillation/{constitution}", adapter_name="dpo", torch_dtype=t.bfloat16)
-        _     = model.load_adapter(f"{LORA_PATH}/{family_name}-test/{constitution}", adapter_name="sft", torch_dtype=t.bfloat16)
-        model.add_weighted_adapter(
-            adapters        = ["dpo", "sft"],  
-            weights         = [1.0, 0.25],
-            adapter_name    = "persona",
-            combination_type = "linear",
-        )
-        model.set_adapter("persona")
-        model.save_pretrained(output_path, adapter_name="persona")
 
-        # file cleanup
-        commands = [
-            f"rm -rf {output_path}/dpo",
-            f"rm -rf {output_path}/sft",
-            f"rm {output_path}/README.md",
-            f"mv {output_path}/persona/adapter_config.json {output_path}/adapter_config.json",
-            f"mv {output_path}/persona/adapter_model.safetensors {output_path}/adapter_model.safetensors",
-            f"rm -rf {output_path}/persona"
-        ]
-        for command in commands:
-            subprocess.run(command, shell=True)
+def main(
+    dpo: str,
+    sft: str,
+    out: str,
+    base_model: str,
+    combination_type: str,
+    svd_rank: int,
+    weights: list[float],
+) -> None:
+    if os.path.exists(out) and os.listdir(out):
+        shutil.rmtree(out)
+    os.makedirs(out, exist_ok=True)
 
-        # move remaining files
-        files = [f for f in os.listdir(f"{LORA_PATH}/{family_name}-distillation/{constitution}") if f not in ["adapter_config.json", "adapter_model.safetensors", "README.md"]]
-        for file in files:
-            subprocess.run(f"cp {LORA_PATH}/{family_name}-distillation/{constitution}/{file} {output_path}/{file}", shell=True)
+    # PEFT 0.20.0's svd path applies the alpha/r scaling twice - once when it scales the
+    # weights and again in get_delta_weight - while the linear path applies it once. so
+    # halve the requested weights on the svd path to land on the effective ones.
+    # (measured on tiny r4/alpha8 adapters, 2026-09-07; if a PEFT release fixes this the
+    # identity test flips loudly and these go back to the effective weights.)
+    call_weights = [w / 2 for w in weights] if combination_type == "svd" else list(weights)
 
-        # update adapter_config.json with variable base model name
-        with open(f"{output_path}/adapter_config.json", 'r') as f:
-            config = json.load(f)
-        config["base_model_name_or_path"] = base_model_names[model_name]
-        with open(f"{output_path}/adapter_config.json", 'w') as f:
-            json.dump(config, f, indent=2)
+    # load base model
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model,
+        torch_dtype=t.bfloat16,
+        device_map="auto",
+        trust_remote_code=True,
+    )
+
+    # load each lora adapter
+    model = PeftModel.from_pretrained(base, dpo, adapter_name="dpo", torch_dtype=t.bfloat16)
+    _     = model.load_adapter(sft, adapter_name="sft", torch_dtype=t.bfloat16)
+    # saved under "default" so save_pretrained writes straight into `out` rather than
+    # nesting one directory per adapter, which is what upstream's mv/rm dance undid
+    model.add_weighted_adapter(
+        adapters         = ["dpo", "sft"],
+        weights          = call_weights,
+        adapter_name     = "default",
+        combination_type = combination_type,
+        svd_rank         = svd_rank,
+    )
+    model.set_adapter("default")
+    model.save_pretrained(out, selected_adapters=["default"])
+
+    # carry over tokenizer files and anything else the dpo stage saved
+    keep = ["adapter_config.json", "adapter_model.safetensors", "README.md"]
+    for f in os.listdir(dpo):
+        if f in keep or os.path.isdir(f"{dpo}/{f}"):
+            continue
+        shutil.copy(f"{dpo}/{f}", f"{out}/{f}")
+
+    # update adapter_config.json with variable base model name
+    with open(f"{out}/adapter_config.json", "r") as f:
+        config = json.load(f)
+    config["base_model_name_or_path"] = base_model
+    with open(f"{out}/adapter_config.json", "w") as f:
+        json.dump(config, f, indent=2)
+
+    meta = {
+        "dpo": {"dir": dpo, "adapter_config_sha256": sha256(f"{dpo}/adapter_config.json")},
+        "sft": {"dir": sft, "adapter_config_sha256": sha256(f"{sft}/adapter_config.json")},
+        "type": combination_type,
+        "svd_rank": svd_rank,
+        "effective_weights": list(weights),
+        "peft_call_weights": call_weights,
+        "base_model_name_or_path": base_model,
+        "r": config["r"],
+        "lora_alpha": config["lora_alpha"],
+        "delta_norm_fro": delta_norm(out),
+    }
+    with open(f"{out}/combine_meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+    print(json.dumps(meta, indent=2))
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, required=True)
-    parser.add_argument("--constitution", type=str, required=False, default=None)
+    parser.add_argument("--dpo", type=str, required=True, help="DPO-stage adapter directory")
+    parser.add_argument("--sft", type=str, required=True, help="SFT-stage adapter directory")
+    parser.add_argument("--out", type=str, required=True, help="output adapter directory")
+    parser.add_argument("--base-model", type=str, required=True,
+                        help="HF id, local path, or a key of base_model_names")
+    parser.add_argument("--type", type=str, choices=["svd", "linear"], default="svd")
+    parser.add_argument("--svd-rank", type=int, default=128)
+    parser.add_argument("--weights", type=float, nargs=2, default=[1.0, 0.25],
+                        metavar=("DPO", "SFT"), help="EFFECTIVE weights, dpo then sft")
     args = parser.parse_args()
-    main(args.model_name, args.constitution)
+    main(
+        args.dpo,
+        args.sft,
+        args.out,
+        base_model_names.get(args.base_model, args.base_model),
+        args.type,
+        args.svd_rank,
+        args.weights,
+    )
