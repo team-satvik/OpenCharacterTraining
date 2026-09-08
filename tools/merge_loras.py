@@ -56,13 +56,16 @@ def main(
     call_weights = [w / 2 for w in weights] if combination_type == "svd" else list(weights)
 
     # The merge is adapter-only arithmetic (B@A per module, then an SVD of the summed delta),
-    # but PEFT needs the base loaded to hang the adapters on. On the GPU that is base +
-    # PEFT's working set: the 32B combination OOMed on a 141 GB H200 (2026-09-08). With
-    # --device cpu the base and adapters load in float32 on the CPU (CPU SVD has no bf16
-    # kernel) and the result is cast back to bf16 before saving, so the artifact matches
-    # the GPU-built one in dtype.
+    # but PEFT needs the base loaded to hang the adapters on, so the base is loaded in bf16
+    # on either device: its weights never enter the arithmetic. The adapters are loaded at
+    # the same dtype and PEFT's default autocast_adapter_dtype upcasts them to float32, so
+    # B@A, the sum and the SVD all run in float32 (CPU SVD has no bf16 kernel) and the
+    # combined adapter is saved in float32 -- the same path, dtypes and artifact as the
+    # GPU build. --device cpu exists because the 32B combination OOMed on a 141 GB H200
+    # (2026-09-08); a first CPU version loaded the base in float32 and sat at 229 GiB
+    # against a 234 GiB container limit, thrashing page cache until it was OOM-killed.
     on_cpu = device == "cpu"
-    dtype = t.float32 if on_cpu else t.bfloat16
+    dtype = t.bfloat16
     base = AutoModelForCausalLM.from_pretrained(
         base_model,
         torch_dtype=dtype,
@@ -83,8 +86,6 @@ def main(
         svd_rank         = svd_rank,
     )
     model.set_adapter("default")
-    if on_cpu:
-        model.to(t.bfloat16)
     model.save_pretrained(out, selected_adapters=["default"])
 
     # carry over tokenizer files and anything else the dpo stage saved
@@ -112,7 +113,7 @@ def main(
         "r": config["r"],
         "lora_alpha": config["lora_alpha"],
         "delta_norm_fro": delta_norm(out),
-        "merge_device": "cpu (float32 arithmetic, saved as bf16)" if on_cpu else "gpu (bf16)",
+        "merge_device": ("cpu" if on_cpu else "gpu") + " (bf16 base, float32 adapters + svd, saved float32)",
     }
     with open(f"{out}/combine_meta.json", "w") as f:
         json.dump(meta, f, indent=2)
@@ -132,8 +133,8 @@ if __name__ == "__main__":
     parser.add_argument("--weights", type=float, nargs=2, default=[1.0, 0.25],
                         metavar=("DPO", "SFT"), help="EFFECTIVE weights, dpo then sft")
     parser.add_argument("--device", type=str, choices=["auto", "cpu"], default="auto",
-                        help="cpu: base + adapters in float32 on the CPU (needs ~4 bytes/param "
-                             "of RAM); the merge is adapter-only so nothing is lost")
+                        help="cpu: base (bf16, ~2 bytes/param of RAM) + adapters on the CPU; "
+                             "the merge is adapter-only so nothing is lost")
     args = parser.parse_args()
     main(
         args.dpo,
