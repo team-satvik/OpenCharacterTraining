@@ -7,6 +7,7 @@ import torch as t
 from safetensors.torch import load_file
 from transformers import AutoModelForCausalLM
 from peft import PeftModel
+from peft.tuners.lora.model import LoraModel
 
 base_model_names = {
     "llama-3.1-8b-it": "meta-llama/Llama-3.1-8B-Instruct",
@@ -32,6 +33,23 @@ def delta_norm(adapter_dir: str) -> float:
         B = weights[key.replace("lora_A", "lora_B")]
         total += t.linalg.matrix_norm(B.double() @ A.double()).item()
     return total
+
+
+# PEFT 0.20.0's svd path returns `Vh[:new_rank, :]`, a VIEW into the full Vh of that module's
+# SVD, and assigns it to the new adapter's lora_A -- so every module's full Vh (n x n float32;
+# 3 GB for a 32B down_proj at full_matrices=True) stays alive on the model for the rest of
+# the loop. That is what OOMed the 32B merge on a 141 GB GPU and again at a 234 GiB CPU
+# cgroup (2026-09-08), and what put the 7B GPU merge at 63 GB. Copying the two factors
+# drops the reference; the values are unchanged.
+_svd_orig = LoraModel._svd_generalized_task_arithmetic_weighted_adapter
+
+
+def _svd_contiguous(self, *args, **kwargs):
+    Vh, U = _svd_orig(self, *args, **kwargs)
+    return Vh.clone(), U.clone()
+
+
+LoraModel._svd_generalized_task_arithmetic_weighted_adapter = _svd_contiguous
 
 
 def main(
@@ -78,12 +96,16 @@ def main(
     _     = model.load_adapter(sft, adapter_name="sft", torch_dtype=dtype)
     # saved under "default" so save_pretrained writes straight into `out` rather than
     # nesting one directory per adapter, which is what upstream's mv/rm dance undid
+    # svd_full_matrices=False: the truncation keeps the first `svd_rank` triplets, which the
+    # thin SVD computes exactly; PEFT's default (True) also builds the m x m U (27648^2 floats
+    # for a 32B gate_proj) at ~5x the work. The 7B organism was combined at the default.
     model.add_weighted_adapter(
-        adapters         = ["dpo", "sft"],
-        weights          = call_weights,
-        adapter_name     = "default",
-        combination_type = combination_type,
-        svd_rank         = svd_rank,
+        adapters          = ["dpo", "sft"],
+        weights           = call_weights,
+        adapter_name      = "default",
+        combination_type  = combination_type,
+        svd_rank          = svd_rank,
+        svd_full_matrices = False,
     )
     model.set_adapter("default")
     model.save_pretrained(out, selected_adapters=["default"])
@@ -114,6 +136,7 @@ def main(
         "lora_alpha": config["lora_alpha"],
         "delta_norm_fro": delta_norm(out),
         "merge_device": ("cpu" if on_cpu else "gpu") + " (bf16 base, float32 adapters + svd, saved float32)",
+        "svd_full_matrices": False,
     }
     with open(f"{out}/combine_meta.json", "w") as f:
         json.dump(meta, f, indent=2)
